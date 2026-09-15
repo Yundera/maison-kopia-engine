@@ -180,7 +180,11 @@ func (e *Engine) Connect(ctx context.Context, o ConnectOpts) error {
 // ErrRepositoryExists means the storage holds a repository this box cannot open. The
 // caller writes the needs-recovery marker; creating a second one under the same prefix
 // is never the answer.
-var ErrRepositoryExists = fmt.Errorf("the storage already holds a repository and this box has no password for it")
+//
+// It is the protocol's error rather than one of this package's own, so that it carries
+// the exit code the caller branches on — an adapter that invented its own would report
+// a rebuilt box as an ordinary failure.
+var ErrRepositoryExists = proto.ErrRepositoryExists
 
 func storageArgs(o ConnectOpts) ([]string, error) {
 	if o.Hostname == "" || o.Username == "" {

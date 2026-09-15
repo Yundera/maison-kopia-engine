@@ -105,10 +105,13 @@ tail and uses it in the error message when the exit code is non-zero.
 | `10` | **not configured** — no repository connected, credentials absent | Renders "not configured". **Not an error**, and not an incident: it is the normal state of a box whose host side has not run. |
 | `11` | **not supported** — this engine cannot do this verb | Maps to `ErrNotSupported`. Must agree with `capabilities`. |
 | `12` | **not writable** — the repository is reachable but refuses writes (a suspended storage space) | Reads and restores continue; writes are reported as failed. |
+| `13` | **repository exists** — the storage already holds a repository this box has no password for | Stop. The host writes a `needs-recovery` marker and does not initialise a second repository under the same prefix. |
 | `1` | any other failure | Operation fails, stderr tail is surfaced. |
 
-`10` and `11` must be distinguished from `1`. Collapsing `10` turns an unprovisioned box into
-a red page; collapsing `11` turns a capability gap into a fault.
+`10`, `11` and `13` must be distinguished from `1`. Collapsing `10` turns an unprovisioned
+box into a red page; collapsing `11` turns a capability gap into a fault; and collapsing
+`13` turns a rebuilt box into a retry that initialises a second repository under the same
+prefix, stranding the first one's snapshots behind a key nobody has.
 
 ---
 
