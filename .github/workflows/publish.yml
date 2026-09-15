@@ -1,0 +1,95 @@
+name: Publish image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # The adapter's tests are pure — no daemon, no repository, no network — so they are
+  # cheap enough to gate every publish on. An adapter image that ships with a broken
+  # protocol is one a PCS installs and then cannot back up with, and the failure surfaces
+  # at 3am rather than here.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+
+      - run: go vet ./...
+
+      - run: go test ./...
+
+  publish:
+    needs: test
+    # A pull request builds and tests but must not publish: the tag it would push to is
+    # derived from the branch, and a fork could otherwise name an existing one.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      # amd64 and arm64 only. kopia also publishes arm/v7, but nothing in the fleet runs
+      # it and a platform published is a platform that has to keep working.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image is only useful if the binary inside it runs, and `capabilities` needs
+      # no repository, no network and no credentials — so it is the one verb that can be
+      # asserted here. It also proves the ENTRYPOINT, which a COPY cannot.
+      - name: Smoke-test the published image
+        run: |
+          tag="$(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+          docker run --rm --network none "$tag" capabilities --repo-dir=/tmp | tee /tmp/caps.json
+          grep -q '"protocol":"v0"' /tmp/caps.json
+          grep -q '"engineId":"kopia"' /tmp/caps.json
