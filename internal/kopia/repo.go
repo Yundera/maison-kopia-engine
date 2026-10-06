@@ -12,7 +12,7 @@ import (
 )
 
 // Version is this adapter's own version, distinct from the kopia it wraps.
-const Version = "0.1.0"
+const Version = "1.1.0"
 
 // Protocol is the adapter protocol version implemented here. Maison refuses an adapter
 // speaking a dialect it does not know rather than guessing — an unknown dialect is
@@ -52,6 +52,8 @@ func (e *Engine) Caps(ctx context.Context) proto.Caps {
 		// Independently deletable generations: any snapshot may be dropped and the ones
 		// either side stay restorable, so tiered retention works in full.
 		RetentionModel: "snapshot",
+		// A rebuilt box reconnects with the key the user was mailed. See Recover.
+		Recover: true,
 	}
 	if v, err := e.RunBare(ctx, "--version"); err == nil {
 		c.EngineVersion = strings.TrimSpace(strings.SplitN(string(v), " ", 2)[0])
@@ -88,7 +90,15 @@ func (e *Engine) readConfig() (repoConfig, error) {
 //
 // Configured and Connected are answered separately and must stay that way: not
 // configured is a box awaiting provisioning, unreachable is a fault.
+//
+// A needs-recovery marker outranks both. The host wrote it because the storage holds a
+// repository this box cannot open, so there is nothing to probe — and reporting "not
+// configured" instead would hide the one state in which the box takes no backups at all
+// while every self-check reports success.
 func (e *Engine) Status(ctx context.Context) proto.Status {
+	if e.needsRecovery() {
+		return proto.Status{NeedsRecovery: true, Detail: "storage holds a repository this box has no key for"}
+	}
 	rc, err := e.readConfig()
 	if err != nil {
 		return proto.Status{Detail: detailFor(err)}

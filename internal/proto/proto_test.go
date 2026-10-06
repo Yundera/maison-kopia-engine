@@ -3,6 +3,8 @@ package proto
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -93,6 +95,28 @@ func TestValidSource(t *testing.T) {
 	} {
 		if got := ValidSource(tc.id); got != tc.want {
 			t.Errorf("ValidSource(%q) = %v, want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
+// Every sentinel keeps its own exit code, wrapped or not. A wrong key collapsed into 1
+// reads as a broken engine rather than as "try again".
+func TestCodeFor(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want int
+	}{
+		{nil, ExitOK},
+		{ErrNotConfigured, ExitNotConfigured},
+		{ErrNotSupported, ExitNotSupported},
+		{ErrNotWritable, ExitNotWritable},
+		{ErrRepositoryExists, ExitRepositoryExists},
+		{ErrWrongPassword, 14},
+		{fmt.Errorf("recover: %w", ErrWrongPassword), 14},
+		{errors.New("anything else"), ExitError},
+	} {
+		if got := CodeFor(tc.err); got != tc.want {
+			t.Errorf("CodeFor(%v) = %d, want %d", tc.err, got, tc.want)
 		}
 	}
 }

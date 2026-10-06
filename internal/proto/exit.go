@@ -20,6 +20,13 @@ const (
 	// behind a key nobody has, and the caller cannot tell that from an ordinary
 	// connect failure by reading an error string.
 	ExitRepositoryExists = 13
+
+	// ExitWrongPassword says a key offered to `recover` does not open the repository.
+	//
+	// It is its own code because it is the user's mistake, not a fault: the answer is
+	// "try again", shown next to the field they typed into, and an ordinary failure
+	// would read as a broken engine.
+	ExitWrongPassword = 14
 )
 
 // ErrNotConfigured is the normal state of a box whose host side has not connected a
@@ -38,6 +45,9 @@ var ErrNotWritable = errors.New("the repository is not accepting writes")
 // See ExitRepositoryExists.
 var ErrRepositoryExists = errors.New("the storage already holds a repository and this box has no password for it")
 
+// ErrWrongPassword is a key that does not open the repository. See ExitWrongPassword.
+var ErrWrongPassword = errors.New("that key does not open the repository")
+
 // CodeFor maps an error to the exit code that describes it.
 func CodeFor(err error) int {
 	switch {
@@ -51,6 +61,8 @@ func CodeFor(err error) int {
 		return ExitNotWritable
 	case errors.Is(err, ErrRepositoryExists):
 		return ExitRepositoryExists
+	case errors.Is(err, ErrWrongPassword):
+		return ExitWrongPassword
 	default:
 		return ExitError
 	}

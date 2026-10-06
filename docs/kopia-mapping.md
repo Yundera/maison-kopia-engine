@@ -13,7 +13,7 @@ rediscovered.
 
 | | Source | Note |
 |---|---|---|
-| `KOPIA_PASSWORD` | `repository.password` in `--repo-dir` | Read per invocation, never cached across one. |
+| `KOPIA_PASSWORD` | `repository.password` in `--repo-dir` | Read per invocation, never cached across one. `recover` alone substitutes the candidate key it is testing. |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `credentials.env` in `--repo-dir` | **Read fresh every time.** They rotate roughly every 90 days, and an adapter that read them at start would serve errors until it was restarted. |
 | `KOPIA_CACHE_DIRECTORY` | `<repo-dir>/cache` | Must be set explicitly — see below. |
 | `KOPIA_LOG_DIR` | `<repo-dir>/logs` | Same. |
@@ -38,8 +38,9 @@ silently shipped offsite forever.
 |---|---|
 | `capabilities` | static; `engineVersion` from `kopia --version` |
 | `connect` | `repository create s3 …` / `repository connect s3 …` |
-| `status` | `repository status` + `state.json` from `--repo-dir` |
+| `status` | `needs-recovery` marker, else `repository status` + `state.json` from `--repo-dir` |
 | `prepare` | `repository status` (warms the cache, proves reachability) |
+| `recover` | `repository connect …` (never `create`) with `KOPIA_PASSWORD` = the candidate, then `snapshot list --all --json` and `snapshot pin --add=maison-recovered <id>…` in batches of 50 |
 | `snapshot` | `snapshot create <path> --progress --tags maison-app:<src> --tags maison-stamp:<stamp> --tags maison-pass:<n>` |
 | `commit` | `snapshot list` for the pair, then `snapshot delete` the pass-1 manifest |
 | `abort` | `snapshot delete` every manifest carrying the stamp |
@@ -134,6 +135,20 @@ belongs in `connect`.
 That is not an error, and it is how this is developed and tested. Never branch on who wrote
 the configuration: a hand-written `repository.config` pointing at a local MinIO or a
 filesystem path must exercise every path.
+
+### A wrong key is recognised by its text
+
+kopia has no distinct exit status for a wrong password. 0.23.1 fails `repository connect`
+with `… unable to create format manager: invalid repository password`, writes no
+configuration file, and removes the cache directory it was about to use. `recover` matches
+that phrase (case-insensitively) and exits `14`; anything else is an ordinary failure.
+
+### Pinning rewrites the snapshot
+
+`snapshot pin --add` is repeatable, takes ids positionally, and is a no-op on a snapshot that
+already carries the pin. It **rewrites the manifest**, so a pinned snapshot comes back under a
+new id. Nothing outside this adapter holds kopia ids, so that is harmless — but an id list
+taken before a pin is stale after it.
 
 ### Never `--enable-actions`
 

@@ -29,8 +29,10 @@ const Binary = "/bin/kopia"
 // Engine is one configured repository directory.
 type Engine struct {
 	// Dir is --repo-dir: the host-written directory holding repository.config,
-	// repository.password, credentials.env and the caches. The adapter reads it and
-	// never writes to it — only the host-side script owns it.
+	// repository.password, credentials.env and the caches. The host-side script owns
+	// it, and the adapter writes to it in exactly two places: `connect`, which kopia
+	// itself writes repository.config for, and `recover`, which promotes the key the
+	// user entered to repository.password. Everything else only reads it.
 	Dir string
 
 	Out *proto.Emitter
@@ -99,11 +101,15 @@ func (e *Engine) credentials() (map[string]string, error) {
 
 // env is the child's environment.
 //
+// password, when non-empty, stands in for repository.password. It exists for `recover`
+// alone, which has to try a key the user typed before anything is allowed to call it
+// the repository's — so it cannot be put where every other verb would read it.
+//
 // KOPIA_CACHE_DIRECTORY and KOPIA_LOG_DIR are set explicitly because the image BAKES
 // them to /app/cache and /app/logs, and those OUTRANK --cache-directory and --log-dir
 // on the command line. /app belongs to root, so without this every command fails with
 // "unable to create cache directory" before it ever reaches the repository.
-func (e *Engine) env(withSecrets bool) ([]string, error) {
+func (e *Engine) env(withSecrets bool, password string) ([]string, error) {
 	env := append(os.Environ(),
 		"KOPIA_CACHE_DIRECTORY="+e.CacheDir(),
 		"KOPIA_LOG_DIR="+e.LogDir(),
@@ -111,9 +117,12 @@ func (e *Engine) env(withSecrets bool) ([]string, error) {
 	if !withSecrets {
 		return env, nil
 	}
-	pw, err := e.password()
-	if err != nil {
-		return nil, err
+	pw := password
+	if pw == "" {
+		var err error
+		if pw, err = e.password(); err != nil {
+			return nil, err
+		}
 	}
 	env = append(env, "KOPIA_PASSWORD="+pw)
 	creds, err := e.credentials()
@@ -133,18 +142,23 @@ func (e *Engine) env(withSecrets bool) ([]string, error) {
 // emits no \n until it is done, so anything waiting for whole lines would deliver
 // nothing until exit.
 func (e *Engine) Run(ctx context.Context, args ...string) ([]byte, error) {
-	return e.run(ctx, true, args...)
+	return e.run(ctx, true, "", args...)
 }
 
 // RunBare is Run without the repository secrets, for a command that must work on a box
 // that has no repository yet — `--version`, and the connect path before a password
 // exists.
 func (e *Engine) RunBare(ctx context.Context, args ...string) ([]byte, error) {
-	return e.run(ctx, false, args...)
+	return e.run(ctx, false, "", args...)
 }
 
-func (e *Engine) run(ctx context.Context, withSecrets bool, args ...string) ([]byte, error) {
-	env, err := e.env(withSecrets)
+// runWithPassword is Run with a password that is not (yet) repository.password. See env.
+func (e *Engine) runWithPassword(ctx context.Context, password string, args ...string) ([]byte, error) {
+	return e.run(ctx, true, password, args...)
+}
+
+func (e *Engine) run(ctx context.Context, withSecrets bool, password string, args ...string) ([]byte, error) {
+	env, err := e.env(withSecrets, password)
 	if err != nil {
 		return nil, err
 	}

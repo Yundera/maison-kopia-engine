@@ -1,6 +1,6 @@
 # The Maison backup adapter protocol
 
-Version **v0** — design only, nothing implemented.
+Version **v0**, implemented by the kopia adapter (`maison-kopia-engine` 1.1.0).
 
 An *adapter* is a container image holding a backup engine and a `maison-engine` binary that
 speaks this protocol. Maison runs one adapter per configured engine and knows nothing about
@@ -106,12 +106,14 @@ tail and uses it in the error message when the exit code is non-zero.
 | `11` | **not supported** — this engine cannot do this verb | Maps to `ErrNotSupported`. Must agree with `capabilities`. |
 | `12` | **not writable** — the repository is reachable but refuses writes (a suspended storage space) | Reads and restores continue; writes are reported as failed. |
 | `13` | **repository exists** — the storage already holds a repository this box has no password for | Stop. The host writes a `needs-recovery` marker and does not initialise a second repository under the same prefix. |
+| `14` | **wrong password** — the key offered to `recover` does not open the repository | Tell the user the key is wrong and let them try again. Nothing on the box changed. |
 | `1` | any other failure | Operation fails, stderr tail is surfaced. |
 
-`10`, `11` and `13` must be distinguished from `1`. Collapsing `10` turns an unprovisioned
+`10`, `11`, `13` and `14` must be distinguished from `1`. Collapsing `10` turns an unprovisioned
 box into a red page; collapsing `11` turns a capability gap into a fault; and collapsing
 `13` turns a rebuilt box into a retry that initialises a second repository under the same
-prefix, stranding the first one's snapshots behind a key nobody has.
+prefix, stranding the first one's snapshots behind a key nobody has. Collapsing `14` turns
+a mistyped key into what reads as a broken engine.
 
 ---
 
@@ -141,7 +143,8 @@ Accepted by every verb:
 
 | Flag | Meaning |
 |---|---|
-| `--repo-dir <path>` | The engine's own directory — `${DATA_ROOT}/AppDataShared/backup/<engine>/`. Holds `repository.config`, `repository.password`, `credentials.env`, caches and logs. The adapter reads it; only the host side writes it. |
+| `--repo-dir <path>` | The engine's own directory — `${DATA_ROOT}/AppDataShared/backup/<engine>/`. Holds `repository.config`, `repository.password`, `credentials.env`, caches and logs. The adapter reads it; the host side writes it, except for what `connect` and `recover` write (see each). |
+| `--timeout <duration>` | Advisory. Maison enforces its own; this lets the adapter fail cleanly first with a better message. |
 
 **The adapter reads its own secrets from `--repo-dir` and is passed none.** The repository
 password and the storage credentials are files in that directory, which the adapter has
@@ -149,7 +152,6 @@ mounted, so there is nothing for the caller to plumb through — and re-reading 
 invocation is what makes a credential rotation take effect on the next backup rather than on
 the next restart. It also keeps Maison out of the repository-password path entirely, apart
 from escrow, which reads the file directly because it has to work when the engine does not.
-| `--timeout <duration>` | Advisory. Maison enforces its own; this lets the adapter fail cleanly first with a better message. |
 
 ---
 
@@ -176,6 +178,35 @@ Exits `10` if credentials are absent — a box not yet provisioned, not a failur
 Returns [`Status`](#status-1). Must answer without a working repository, distinguishing
 *not configured* from *configured but unreachable* — Maison's incident logic depends on
 exactly that difference.
+
+#### `recover`
+No verb flags. Reconnects a rebuilt box to the repository its storage already holds, with a
+key the user supplies — the way out of the state `connect` stops in with exit `13`.
+
+It reads three files from `--repo-dir`:
+
+| File | Written by | |
+|---|---|---|
+| `repository.password.candidate` | Maison, `0600` | The key the user typed. **Removed on every path**, success or failure. |
+| `connect.json` | the host, non-secret | `{"bucket","endpoint","region","prefix","hostname","username"}`, the same values the host passed to `connect`; an optional `"path"` selects a filesystem repository instead. |
+| `needs-recovery` | the host | The marker `status` reports. |
+
+**Connects only, never creates.** A create here would answer a wrong key with a second,
+empty repository under the same prefix.
+
+- No candidate, or no usable `connect.json` → exit `10`.
+- A repository configuration already exists and there is no marker → exit `1`
+  ("already connected"). Connecting again would rewrite the identity.
+- Wrong key → exit `14`. Nothing but the candidate is touched; the marker stays.
+- Any other failure → exit `1`, with the box left as it was.
+- Success: the candidate becomes `repository.password` (atomically, `0600`, owned like
+  `--repo-dir`), the marker is removed, and **every snapshot in the repository is pinned**
+  against expiry. A rebuilt box is usually empty when the key goes in, and the next scheduled
+  backups would otherwise push the real ones out of retention. A pin that fails is logged and
+  shows in the result; it does not fail the recovery.
+
+Returns `{"snapshots": N, "pinned": M}` — how many snapshots the repository holds, and how
+many are now pinned. Only offered when `capabilities` reports `recover: true`.
 
 #### `prepare`
 Best-effort warm-up before a batch of operations (cache validation, a connectivity probe).
@@ -293,7 +324,7 @@ explicitly instead.
 {
   "engineId": "kopia",             // permanent. Recorded on every backup this adapter writes.
   "engineVersion": "0.23.1",
-  "adapterVersion": "0.1.0",
+  "adapterVersion": "1.1.0",
   "protocol": "v0",
 
   "offsite": true,                 // survives the loss of this machine
@@ -305,7 +336,8 @@ explicitly instead.
   "consumesSource": false,         // can take the source folder rather than read it
   "retention": true,               // expires backups itself; ensure-retention is meaningful
 
-  "retentionModel": "snapshot"     // snapshot | chain | lifecycle | none
+  "retentionModel": "snapshot",    // snapshot | chain | lifecycle | none
+  "recover": true                  // implements `recover`; Maison offers the key form only when set
 }
 ```
 
@@ -335,6 +367,7 @@ question from who performs it and from what the user asked for:
 {
   "configured": true,              // a repository configuration exists on disk
   "connected": true,               // it was reachable on this probe
+  "needsRecovery": false,          // the storage holds a repository this box has no key for (omitted when false)
   "identity": "pcs@a1b2c3d4",      // the lineage snapshots are filed under
   "detail": ""                     // human-readable, for the settings page when something is wrong
 }
@@ -350,6 +383,11 @@ able to say whose space it is.
 
 `configured: false` and `connected: false` are **different states** and must not be
 conflated: the first is a box awaiting provisioning, the second is a fault.
+
+`needsRecovery: true` is a third, reported whenever the host's `needs-recovery` marker is in
+`--repo-dir`, with `configured` and `connected` both false. It is neither of the other two:
+provisioning ran and stopped rather than create a second repository over the first, and the
+box takes no backups until the user enters the key through [`recover`](#recover).
 
 `identity` is what Maison compares against the resident container before using it. A
 container disagreeing would open a second lineage inside one repository — see

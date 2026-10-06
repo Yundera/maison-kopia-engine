@@ -61,6 +61,11 @@ type Caps struct {
 	// RetentionModel says what kind of expiry this storage can survive:
 	// "snapshot" | "chain" | "lifecycle" | "none". See docs/protocol.md.
 	RetentionModel string `json:"retentionModel,omitempty"`
+
+	// Recover says the adapter implements `recover`: reconnecting a rebuilt box to the
+	// repository its storage already holds, with a key the user supplies. Maison offers
+	// the key form only when this is set.
+	Recover bool `json:"recover,omitempty"`
 }
 
 // Status is what `status` returns.
@@ -71,11 +76,25 @@ type Caps struct {
 //
 // Label, writability and credential expiry are deliberately absent: they come from the
 // host-written state.json, which is engine-neutral and which Maison already reads.
+//
+// NeedsRecovery is a third state, distinct from both: the storage holds a repository
+// this box has no key for (a rebuilt box). Configured and Connected are false, because
+// nothing here can open it, and it is not "awaiting provisioning" either — provisioning
+// ran and stopped rather than create a second repository over the first. Only the key
+// the user was mailed gets it out, through `recover`.
 type Status struct {
-	Configured bool   `json:"configured"`
-	Connected  bool   `json:"connected"`
-	Identity   string `json:"identity,omitempty"`
-	Detail     string `json:"detail,omitempty"`
+	Configured    bool   `json:"configured"`
+	Connected     bool   `json:"connected"`
+	NeedsRecovery bool   `json:"needsRecovery,omitempty"`
+	Identity      string `json:"identity,omitempty"`
+	Detail        string `json:"detail,omitempty"`
+}
+
+// Recovered is what `recover` returns: how many snapshots the repository holds, and how
+// many of them were pinned against expiry.
+type Recovered struct {
+	Snapshots int `json:"snapshots"`
+	Pinned    int `json:"pinned"`
 }
 
 // Backup is one restorable backup of one source.

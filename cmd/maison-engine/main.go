@@ -60,7 +60,7 @@ func run() int {
 
 const usage = `maison-engine <verb> [flags]
 
-repository:  capabilities  connect  status  prepare
+repository:  capabilities  connect  status  prepare  recover
 snapshots:   snapshot  commit  abort  list  list-all  delete
 restore:     materialize  restore-in-place  entries
 retention:   ensure-retention
@@ -156,6 +156,13 @@ func dispatch(ctx context.Context, out *proto.Emitter, verb string, args []strin
 			Bucket: *bucket, Endpoint: *endpoint, Region: *region, Prefix: *prefix,
 			Hostname: *hostname, Username: *username, Path: *repoPath,
 		})
+
+	case "recover":
+		r, err := e.Recover(ctx)
+		if err != nil {
+			return err
+		}
+		return out.Result(r)
 
 	case "snapshot":
 		rules, err := readExcludes(*excludeFile)
