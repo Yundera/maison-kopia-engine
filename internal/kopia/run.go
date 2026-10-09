@@ -30,9 +30,10 @@ const Binary = "/bin/kopia"
 type Engine struct {
 	// Dir is --repo-dir: the host-written directory holding repository.config,
 	// repository.password, credentials.env and the caches. The host-side script owns
-	// it, and the adapter writes to it in exactly two places: `connect`, which kopia
-	// itself writes repository.config for, and `recover`, which promotes the key the
-	// user entered to repository.password. Everything else only reads it.
+	// it, and the adapter writes to it in exactly three places: `connect`, which kopia
+	// itself writes repository.config for, and `recover` and `change-secret`, which
+	// promote a key the user supplied to repository.password. Everything else only
+	// reads it.
 	Dir string
 
 	Out *proto.Emitter
@@ -109,7 +110,7 @@ func (e *Engine) credentials() (map[string]string, error) {
 // them to /app/cache and /app/logs, and those OUTRANK --cache-directory and --log-dir
 // on the command line. /app belongs to root, so without this every command fails with
 // "unable to create cache directory" before it ever reaches the repository.
-func (e *Engine) env(withSecrets bool, password string) ([]string, error) {
+func (e *Engine) env(withSecrets bool, password string, extra []string) ([]string, error) {
 	env := append(os.Environ(),
 		"KOPIA_CACHE_DIRECTORY="+e.CacheDir(),
 		"KOPIA_LOG_DIR="+e.LogDir(),
@@ -132,7 +133,7 @@ func (e *Engine) env(withSecrets bool, password string) ([]string, error) {
 	for k, v := range creds {
 		env = append(env, k+"="+v)
 	}
-	return env, nil
+	return append(env, extra...), nil
 }
 
 // Run invokes kopia and returns its stdout.
@@ -142,23 +143,31 @@ func (e *Engine) env(withSecrets bool, password string) ([]string, error) {
 // emits no \n until it is done, so anything waiting for whole lines would deliver
 // nothing until exit.
 func (e *Engine) Run(ctx context.Context, args ...string) ([]byte, error) {
-	return e.run(ctx, true, "", args...)
+	return e.run(ctx, true, "", nil, args...)
 }
 
 // RunBare is Run without the repository secrets, for a command that must work on a box
 // that has no repository yet — `--version`, and the connect path before a password
 // exists.
 func (e *Engine) RunBare(ctx context.Context, args ...string) ([]byte, error) {
-	return e.run(ctx, false, "", args...)
+	return e.run(ctx, false, "", nil, args...)
 }
 
 // runWithPassword is Run with a password that is not (yet) repository.password. See env.
 func (e *Engine) runWithPassword(ctx context.Context, password string, args ...string) ([]byte, error) {
-	return e.run(ctx, true, password, args...)
+	return e.run(ctx, true, password, nil, args...)
 }
 
-func (e *Engine) run(ctx context.Context, withSecrets bool, password string, args ...string) ([]byte, error) {
-	env, err := e.env(withSecrets, password)
+// runChangePassword is `repository change-password` from the current key to next.
+//
+// The new key travels as KOPIA_NEW_PASSWORD, never as --new-password: argv is readable
+// by every process on the host. Verified against kopia 0.23.1.
+func (e *Engine) runChangePassword(ctx context.Context, next string) ([]byte, error) {
+	return e.run(ctx, true, "", []string{"KOPIA_NEW_PASSWORD=" + next}, "repository", "change-password")
+}
+
+func (e *Engine) run(ctx context.Context, withSecrets bool, password string, extra []string, args ...string) ([]byte, error) {
+	env, err := e.env(withSecrets, password, extra)
 	if err != nil {
 		return nil, err
 	}

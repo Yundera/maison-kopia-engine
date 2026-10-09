@@ -60,7 +60,7 @@ func run() int {
 
 const usage = `maison-engine <verb> [flags]
 
-repository:  capabilities  connect  status  prepare  recover
+repository:  capabilities  connect  status  prepare  recover  change-secret
 snapshots:   snapshot  commit  abort  list  list-all  delete
 restore:     materialize  restore-in-place  entries
 retention:   ensure-retention
@@ -141,6 +141,16 @@ func dispatch(ctx context.Context, out *proto.Emitter, verb string, args []strin
 	}
 	defer cancel()
 
+	// Every verb that opens the repository first settles a password change cut short
+	// (see kopia.SettleNext) — otherwise the first backup after such a crash fails on a
+	// key that is no longer the repository's. status settles inside Status; connect and
+	// recover run before a repository exists; change-secret settles its own.
+	switch verb {
+	case "capabilities", "status", "connect", "recover", "change-secret":
+	default:
+		e.SettleNext(ctx)
+	}
+
 	switch verb {
 	case "capabilities":
 		return out.Result(e.Caps(ctx))
@@ -156,6 +166,9 @@ func dispatch(ctx context.Context, out *proto.Emitter, verb string, args []strin
 			Bucket: *bucket, Endpoint: *endpoint, Region: *region, Prefix: *prefix,
 			Hostname: *hostname, Username: *username, Path: *repoPath,
 		})
+
+	case "change-secret":
+		return e.ChangeSecret(ctx)
 
 	case "recover":
 		r, err := e.Recover(ctx)

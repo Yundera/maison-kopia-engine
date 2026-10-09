@@ -12,7 +12,7 @@ import (
 )
 
 // Version is this adapter's own version, distinct from the kopia it wraps.
-const Version = "1.1.0"
+const Version = "1.2.0"
 
 // Protocol is the adapter protocol version implemented here. Maison refuses an adapter
 // speaking a dialect it does not know rather than guessing — an unknown dialect is
@@ -54,6 +54,8 @@ func (e *Engine) Caps(ctx context.Context) proto.Caps {
 		RetentionModel: "snapshot",
 		// A rebuilt box reconnects with the key the user was mailed. See Recover.
 		Recover: true,
+		// The repository password can be replaced in place. See ChangeSecret.
+		ChangeSecret: true,
 	}
 	if v, err := e.RunBare(ctx, "--version"); err == nil {
 		c.EngineVersion = strings.TrimSpace(strings.SplitN(string(v), " ", 2)[0])
@@ -103,6 +105,9 @@ func (e *Engine) Status(ctx context.Context) proto.Status {
 	if err != nil {
 		return proto.Status{Detail: detailFor(err)}
 	}
+	// A password change cut short between kopia and the file is settled before anything
+	// is probed, so the probe below runs with whichever key now opens the repository.
+	e.SettleNext(ctx)
 	identity := rc.Username + "@" + rc.Hostname
 	if _, err := e.Run(ctx, "repository", "status", "--json"); err != nil {
 		return proto.Status{Configured: true, Identity: identity, Detail: err.Error()}

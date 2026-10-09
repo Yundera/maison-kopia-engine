@@ -14,6 +14,7 @@ rediscovered.
 | | Source | Note |
 |---|---|---|
 | `KOPIA_PASSWORD` | `repository.password` in `--repo-dir` | Read per invocation, never cached across one. `recover` alone substitutes the candidate key it is testing. |
+| `KOPIA_NEW_PASSWORD` | `repository.password.next` in `--repo-dir` | `change-secret` only. kopia's `repository change-password` also takes `--new-password`, which is never used: argv is readable by every process on the host. |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `credentials.env` in `--repo-dir` | **Read fresh every time.** They rotate roughly every 90 days, and an adapter that read them at start would serve errors until it was restarted. |
 | `KOPIA_CACHE_DIRECTORY` | `<repo-dir>/cache` | Must be set explicitly — see below. |
 | `KOPIA_LOG_DIR` | `<repo-dir>/logs` | Same. |
@@ -40,6 +41,7 @@ silently shipped offsite forever.
 | `connect` | `repository create s3 …` / `repository connect s3 …` |
 | `status` | `needs-recovery` marker, else `repository status` + `state.json` from `--repo-dir` |
 | `prepare` | `repository status` (warms the cache, proves reachability) |
+| `change-secret` | `repository change-password` with `KOPIA_PASSWORD` = the current key and `KOPIA_NEW_PASSWORD` = `.next`; on an ambiguous failure, `repository status` with each key to learn which one the repository now takes |
 | `recover` | `repository connect …` (never `create`) with `KOPIA_PASSWORD` = the candidate, then `snapshot list --all --json` and `snapshot pin --add=maison-recovered <id>…` in batches of 50 |
 | `snapshot` | `snapshot create <path> --progress --tags maison-app:<src> --tags maison-stamp:<stamp> --tags maison-pass:<n>` |
 | `commit` | `snapshot list` for the pair, then `snapshot delete` the pass-1 manifest |
@@ -142,6 +144,19 @@ kopia has no distinct exit status for a wrong password. 0.23.1 fails `repository
 with `… unable to create format manager: invalid repository password`, writes no
 configuration file, and removes the cache directory it was about to use. `recover` matches
 that phrase (case-insensitively) and exits `14`; anything else is an ordinary failure.
+
+### Changing the password re-wraps, it does not re-encrypt
+
+Verified against kopia 0.23.1: a repository created with no format flags is format version 3
+with `Password changes: true` (`repository status`), so `repository change-password` works on
+every repository this adapter ever created. The change rewrites `kopia.repository` (the format
+blob holding the master key, wrapped under the password) and drops the local copies of it from
+the cache; the old password then fails at once with the same `invalid repository password` text
+`recover` matches, and every snapshot lists and restores with the new one.
+
+Another client already connected — kopia's UI container — fails on its next open of the
+repository, because it holds the old password from its environment. It has to be restarted
+after a change, exactly as it is after a credential rotation.
 
 ### Pinning rewrites the snapshot
 

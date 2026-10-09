@@ -106,7 +106,7 @@ tail and uses it in the error message when the exit code is non-zero.
 | `11` | **not supported** — this engine cannot do this verb | Maps to `ErrNotSupported`. Must agree with `capabilities`. |
 | `12` | **not writable** — the repository is reachable but refuses writes (a suspended storage space) | Reads and restores continue; writes are reported as failed. |
 | `13` | **repository exists** — the storage already holds a repository this box has no password for | Stop. The host writes a `needs-recovery` marker and does not initialise a second repository under the same prefix. |
-| `14` | **wrong password** — the key offered to `recover` does not open the repository | Tell the user the key is wrong and let them try again. Nothing on the box changed. |
+| `14` | **wrong password** — the key offered to `recover` does not open the repository, or the box's own key no longer opens it when `change-secret` runs | Tell the user the key is wrong and let them try again. Nothing on the box changed. |
 | `1` | any other failure | Operation fails, stderr tail is surfaced. |
 
 `10`, `11`, `13` and `14` must be distinguished from `1`. Collapsing `10` turns an unprovisioned
@@ -143,7 +143,7 @@ Accepted by every verb:
 
 | Flag | Meaning |
 |---|---|
-| `--repo-dir <path>` | The engine's own directory — `${DATA_ROOT}/AppDataShared/backup/<engine>/`. Holds `repository.config`, `repository.password`, `credentials.env`, caches and logs. The adapter reads it; the host side writes it, except for what `connect` and `recover` write (see each). |
+| `--repo-dir <path>` | The engine's own directory — `${DATA_ROOT}/AppData/<engine>/engine/` (formerly `${DATA_ROOT}/AppDataShared/backup/<engine>/`). Holds `repository.config`, `repository.password`, `credentials.env`, caches and logs. The adapter reads it; the host side writes it, except for what `connect`, `recover` and `change-secret` write (see each). |
 | `--timeout <duration>` | Advisory. Maison enforces its own; this lets the adapter fail cleanly first with a better message. |
 
 **The adapter reads its own secrets from `--repo-dir` and is passed none.** The repository
@@ -207,6 +207,39 @@ empty repository under the same prefix.
 
 Returns `{"snapshots": N, "pinned": M}` — how many snapshots the repository holds, and how
 many are now pinned. Only offered when `capabilities` reports `recover: true`.
+
+#### `change-secret`
+No verb flags. Replaces the key that opens the repository, on a box that holds the current
+one. The new key is read from `repository.password.next` in `--repo-dir` (Maison writes it,
+`0600`); the current one is `repository.password` as always. Neither is ever on argv.
+
+- No `.next` → exit `10`. A box waiting for recovery, or with no repository configured,
+  also exits `10` — there is no key to change from.
+- An empty key, or a current key that no longer opens the repository → exit `14`.
+- Success: the repository accepts only the new key, `.next` becomes `repository.password`
+  (atomically, `0600`, owned like `--repo-dir`) and is removed. A new key equal to the current
+  one is a no-op success.
+
+**What it is and is not.** The engine re-wraps the repository's master key under the new
+password: nothing is re-encrypted, every existing snapshot stays readable with the new key,
+and the old one stops opening the repository immediately. Anyone who already copied the
+repository's key material *together with* the old password keeps access — a clean break
+needs a new repository, which is not this verb.
+
+**`.next` is the adapter's to remove, and only when the outcome is known.** Between the
+engine accepting the new key and the file being replaced, `repository.password` opens
+nothing and `.next` is the only working copy. So:
+
+- the adapter removes `.next` once the change succeeded or certainly did not happen;
+- when it cannot tell (deadline, unreachable storage) it leaves `.next`, and every later verb
+  that opens the repository — `status` included — first asks which key opens it: the current
+  one → `.next` was stale and goes; only `.next` → it is promoted. Neither answered → both are
+  kept and the next invocation asks again;
+- this is serialised with an exclusive lock in `--repo-dir`, so a `status` probe never settles
+  a `.next` while a `change-secret` is still running.
+
+The caller therefore must **not** delete `.next` after an ambiguous failure. Only offered when
+`capabilities` reports `changeSecret: true`.
 
 #### `prepare`
 Best-effort warm-up before a batch of operations (cache validation, a connectivity probe).
@@ -324,7 +357,7 @@ explicitly instead.
 {
   "engineId": "kopia",             // permanent. Recorded on every backup this adapter writes.
   "engineVersion": "0.23.1",
-  "adapterVersion": "1.1.0",
+  "adapterVersion": "1.2.0",
   "protocol": "v0",
 
   "offsite": true,                 // survives the loss of this machine
@@ -337,7 +370,8 @@ explicitly instead.
   "retention": true,               // expires backups itself; ensure-retention is meaningful
 
   "retentionModel": "snapshot",    // snapshot | chain | lifecycle | none
-  "recover": true                  // implements `recover`; Maison offers the key form only when set
+  "recover": true,                 // implements `recover`; Maison offers the key form only when set
+  "changeSecret": true             // implements `change-secret`; Maison offers the change form only when set
 }
 ```
 

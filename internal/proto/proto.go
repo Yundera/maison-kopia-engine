@@ -66,6 +66,11 @@ type Caps struct {
 	// repository its storage already holds, with a key the user supplies. Maison offers
 	// the key form only when this is set.
 	Recover bool `json:"recover,omitempty"`
+
+	// ChangeSecret says the adapter implements `change-secret`: replacing the key that
+	// opens the repository, on a box that holds the current one. Maison offers the
+	// change form only when this is set.
+	ChangeSecret bool `json:"changeSecret,omitempty"`
 }
 
 // Status is what `status` returns.
