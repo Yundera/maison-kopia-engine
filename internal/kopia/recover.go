@@ -13,8 +13,8 @@ import (
 	"github.com/yundera/maison-kopia-engine/internal/proto"
 )
 
-// Files `recover` works from. The host writes the marker and connect.json; Maison
-// writes the candidate.
+// Files `recover` works from. The host — or `serve`, on a box without one — writes the
+// marker; the host or the owner writes connect.json; Maison writes the candidate.
 func (e *Engine) MarkerFile() string    { return filepath.Join(e.Dir, "needs-recovery") }
 func (e *Engine) ConnectFile() string   { return filepath.Join(e.Dir, "connect.json") }
 func (e *Engine) CandidateFile() string { return filepath.Join(e.Dir, "repository.password.candidate") }
@@ -40,7 +40,8 @@ func (e *Engine) needsRecovery() bool {
 }
 
 // connectFile is connect.json: the storage parameters the host passed to `connect`,
-// written down so `recover` can repeat them without the host. Non-secret — the storage
+// written down so `recover` can repeat them without the host. On a box without a host
+// side the owner writes it, and `serve` connects from it. Non-secret — the storage
 // key is credentials.env, the repository key is what is being recovered.
 type connectFile struct {
 	Bucket   string `json:"bucket"`
@@ -52,19 +53,29 @@ type connectFile struct {
 	Path     string `json:"path,omitempty"` // filesystem repository, for development
 }
 
+// connectOpts reads connect.json as written, with nothing defaulted: `recover` must
+// repeat exactly what `connect` was given, and `serve` fills its own defaults first.
+func connectOpts(b []byte) (ConnectOpts, error) {
+	var c connectFile
+	if err := json.Unmarshal(b, &c); err != nil {
+		return ConnectOpts{}, fmt.Errorf("unreadable connect.json: %v: %w", err, proto.ErrNotConfigured)
+	}
+	return ConnectOpts{
+		Bucket: c.Bucket, Endpoint: c.Endpoint, Region: c.Region, Prefix: c.Prefix,
+		Hostname: c.Hostname, Username: c.Username, Path: c.Path,
+	}, nil
+}
+
 // parseConnect reads connect.json into the arguments `repository connect` takes.
 //
 // Anything unusable is ErrNotConfigured, not a fault: the host has not (yet) written
 // what a recovery needs, and the same host run that writes it fixes it.
 func parseConnect(b []byte) ([]string, error) {
-	var c connectFile
-	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("unreadable connect.json: %v: %w", err, proto.ErrNotConfigured)
+	o, err := connectOpts(b)
+	if err != nil {
+		return nil, err
 	}
-	args, err := storageArgs(ConnectOpts{
-		Bucket: c.Bucket, Endpoint: c.Endpoint, Region: c.Region, Prefix: c.Prefix,
-		Hostname: c.Hostname, Username: c.Username, Path: c.Path,
-	})
+	args, err := storageArgs(o)
 	if err != nil {
 		return nil, fmt.Errorf("connect.json: %v: %w", err, proto.ErrNotConfigured)
 	}

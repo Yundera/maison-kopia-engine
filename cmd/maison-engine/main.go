@@ -4,6 +4,10 @@
 //
 //	docker exec <container> maison-engine snapshot --source-id app:x --path /DATA/... --stamp ... --pass 2
 //
+// The one exception is `serve`, the resident container's own main process: it
+// provisions the repository on a box with no host side to do it, then waits to be
+// exec'd into.
+//
 // NDJSON on stdout, diagnostics on stderr, a documented exit code. See docs/protocol.md.
 package main
 
@@ -61,6 +65,7 @@ func run() int {
 const usage = `maison-engine <verb> [flags]
 
 repository:  capabilities  connect  status  prepare  recover  change-secret
+resident:    serve
 snapshots:   snapshot  commit  abort  list  list-all  delete
 restore:     materialize  restore-in-place  entries
 retention:   ensure-retention
@@ -144,9 +149,10 @@ func dispatch(ctx context.Context, out *proto.Emitter, verb string, args []strin
 	// Every verb that opens the repository first settles a password change cut short
 	// (see kopia.SettleNext) — otherwise the first backup after such a crash fails on a
 	// key that is no longer the repository's. status settles inside Status; connect and
-	// recover run before a repository exists; change-secret settles its own.
+	// recover run before a repository exists; change-secret settles its own; serve runs
+	// for the container's lifetime, and the verbs exec'd beside it settle for it.
 	switch verb {
-	case "capabilities", "status", "connect", "recover", "change-secret":
+	case "capabilities", "status", "connect", "recover", "change-secret", "serve":
 	default:
 		e.SettleNext(ctx)
 	}
@@ -169,6 +175,9 @@ func dispatch(ctx context.Context, out *proto.Emitter, verb string, args []strin
 
 	case "change-secret":
 		return e.ChangeSecret(ctx)
+
+	case "serve":
+		return e.Serve(ctx, serveOpts())
 
 	case "recover":
 		r, err := e.Recover(ctx)
@@ -275,4 +284,43 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// serveOpts is how the container was declared, which only its declaration can say: the
+// image and the container name come from the environment the compose file sets, the
+// rest from the process itself.
+func serveOpts() kopia.ServeOpts {
+	o := kopia.ServeOpts{
+		Image:      os.Getenv("MAISON_ENGINE_IMAGE"),
+		Container:  os.Getenv("MAISON_ENGINE_CONTAINER"),
+		Entrypoint: "/usr/local/bin/maison-engine",
+	}
+	if p, err := os.Executable(); err == nil {
+		o.Entrypoint = p
+	}
+	if h, err := os.Hostname(); err == nil {
+		o.Hostname = h
+	}
+	// As PID 1 this process inherits every orphan in the container: a kopia whose
+	// `docker exec` parent was killed by a cancelled backup is reparented here, and
+	// `sleep infinity` — what this replaces — never reaped them either. Only PID 1
+	// reaps, so a `serve` run by hand does not wait on children it does not own.
+	if os.Getpid() == 1 {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGCHLD)
+		o.Child = ch
+		o.Reap = reap
+	}
+	return o
+}
+
+// reap collects every exited child without blocking.
+func reap() {
+	for {
+		var ws syscall.WaitStatus
+		pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
+		if pid <= 0 || err != nil {
+			return
+		}
+	}
 }

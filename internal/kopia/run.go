@@ -30,10 +30,11 @@ const Binary = "/bin/kopia"
 type Engine struct {
 	// Dir is --repo-dir: the host-written directory holding repository.config,
 	// repository.password, credentials.env and the caches. The host-side script owns
-	// it, and the adapter writes to it in exactly three places: `connect`, which kopia
-	// itself writes repository.config for, and `recover` and `change-secret`, which
-	// promote a key the user supplied to repository.password. Everything else only
-	// reads it.
+	// it, and the adapter writes to it in exactly four places: `connect`, which kopia
+	// itself writes repository.config for; `recover` and `change-secret`, which
+	// promote a key the user supplied to repository.password; and `serve`, which on a
+	// box with no host side does the host's part — the password, the connect, the
+	// needs-recovery marker and adapter.json. Everything else only reads it.
 	Dir string
 
 	Out *proto.Emitter

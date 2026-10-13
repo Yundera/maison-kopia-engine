@@ -30,7 +30,7 @@ invariants, not the verbs.
 
 | | Why not |
 |---|---|
-| Fetching storage credentials | The PCS host does this (`ensure-backup-credentials.sh`). The adapter reads what it finds. |
+| Fetching storage credentials | The PCS host does this (`ensure-backup-credentials.sh`), or on a box with no host side the owner writes `credentials.env` by hand. The adapter reads what it finds. |
 | Key escrow | Maison reads `repository.password` from disk directly. The key matters most when the box is broken, so the escrow path must not need a working container. |
 | Scheduling, retention *policy* | Maison decides what to keep; the adapter only says what expiry its storage can survive. |
 | Stopping and starting apps | Maison owns app lifecycle. An adapter that could stop containers could extend an app's downtime. |
@@ -46,6 +46,10 @@ docker exec <engine-container> maison-engine <verb> [flags…]
 
 One process per verb. No daemon, no listening socket, no state between invocations beyond
 what lives in the repository directory.
+
+The resident container's own main process is the one exception, and it is still not a
+daemon anyone talks to: [`serve`](#serve) provisions the repository on a box with no host
+side, then waits to be exec'd into, as `sleep infinity` did. It listens on nothing.
 
 The adapter is also runnable as `docker run --rm <image> maison-engine <verb> …` — the same
 binary, the same contract. Maison uses a resident container because container start on a PCS
@@ -105,7 +109,7 @@ tail and uses it in the error message when the exit code is non-zero.
 | `10` | **not configured** — no repository connected, credentials absent | Renders "not configured". **Not an error**, and not an incident: it is the normal state of a box whose host side has not run. |
 | `11` | **not supported** — this engine cannot do this verb | Maps to `ErrNotSupported`. Must agree with `capabilities`. |
 | `12` | **not writable** — the repository is reachable but refuses writes (a suspended storage space) | Reads and restores continue; writes are reported as failed. |
-| `13` | **repository exists** — the storage already holds a repository this box has no password for | Stop. The host writes a `needs-recovery` marker and does not initialise a second repository under the same prefix. |
+| `13` | **repository exists** — the storage already holds a repository this box has no password for | Stop. The host — or `serve`, on a box without one — writes a `needs-recovery` marker and does not initialise a second repository under the same prefix. |
 | `14` | **wrong password** — the key offered to `recover` does not open the repository, or the box's own key no longer opens it when `change-secret` runs | Tell the user the key is wrong and let them try again. Nothing on the box changed. |
 | `1` | any other failure | Operation fails, stderr tail is surfaced. |
 
@@ -143,7 +147,7 @@ Accepted by every verb:
 
 | Flag | Meaning |
 |---|---|
-| `--repo-dir <path>` | The engine's own directory — `${DATA_ROOT}/AppData/<engine>/engine/` (formerly `${DATA_ROOT}/AppDataShared/backup/<engine>/`). Holds `repository.config`, `repository.password`, `credentials.env`, caches and logs. The adapter reads it; the host side writes it, except for what `connect`, `recover` and `change-secret` write (see each). |
+| `--repo-dir <path>` | The engine's own directory — `${DATA_ROOT}/AppData/<engine>/engine/` (formerly `${DATA_ROOT}/AppDataShared/backup/<engine>/`). Holds `repository.config`, `repository.password`, `credentials.env`, caches and logs. The adapter reads it; the host side writes it, except for what `connect`, `recover`, `change-secret` and `serve` write (see each). |
 | `--timeout <duration>` | Advisory. Maison enforces its own; this lets the adapter fail cleanly first with a better message. |
 
 **The adapter reads its own secrets from `--repo-dir` and is passed none.** The repository
@@ -172,7 +176,44 @@ containing engine-specific commands.
 configuration that exists. Identity is written once; see
 [Lineage is written once](#lineage-is-written-once).
 
-Exits `10` if credentials are absent — a box not yet provisioned, not a failure.
+Exits `10` if there is no `repository.password` — a box not yet provisioned, not a failure.
+The password is the caller's to mint, before the create, because it has to survive the create
+failing. Absent storage credentials are not refused: a filesystem repository has none.
+
+#### `serve`
+No verb flags. **The resident container's main process**, in place of `sleep infinity`, for a
+box with no host side to provision the repository — an engine installed from an app store.
+It never returns on its own: it exits `0` on `SIGTERM` and never exits non-zero, because a
+restart loop cures nothing a fixed file would not.
+
+It reads what the owner dropped into `--repo-dir`, and on every look until there is nothing
+left to do, in this order — the order of the host's `ensure-backup-config.sh`, which it ports:
+
+1. `needs-recovery` present → write `adapter.json`, done. Recovery is Maison's key entry.
+2. `repository.config` present → write `adapter.json`, done. **Never reconnected.**
+3. No `connect.json` → log and look again in a minute. Files dropped later are picked up
+   without a restart.
+4. No `repository.password` → mint one (33 random bytes, base64, `0600`), **before** the
+   create, so a crash between the two cannot lose the only key.
+5. `connect`, with `connect.json`'s values; `hostname` defaults to the container's own and
+   `username` to `pcs`. Success → `adapter.json`, done. Exit-`13` state → remove a password
+   minted in this run, write `needs-recovery` and `adapter.json`, done. Anything else → keep
+   the password and retry with a backoff capped at fifteen minutes.
+
+`adapter.json` is the descriptor Maison discovers engines by, field for field what the host
+writes. What only the container's declaration knows comes from its environment:
+
+| Variable | |
+|---|---|
+| `MAISON_ENGINE_IMAGE` | The image reference, spelled as the compose file spells it. Baked in at build time (`IMAGE_REF`); a compose file that pins differently sets it. |
+| `MAISON_ENGINE_CONTAINER` | The container's name. **Required**: without it no descriptor is written, since a one-shot-only engine is not a deployed shape. |
+
+The identity in the descriptor is read from `repository.config` once there is one, never
+recomputed. A `connect.json` hostname that differs from the container's is allowed, and
+warned about: Maison only execs into a container whose hostname matches the descriptor, so
+every command would pay for a one-shot container instead.
+
+As PID 1 it also reaps the orphans a killed `docker exec` leaves behind.
 
 #### `status`
 Returns [`Status`](#status-1). Must answer without a working repository, distinguishing
@@ -188,8 +229,8 @@ It reads three files from `--repo-dir`:
 | File | Written by | |
 |---|---|---|
 | `repository.password.candidate` | Maison, `0600` | The key the user typed. **Removed on every path**, success or failure. |
-| `connect.json` | the host, non-secret | `{"bucket","endpoint","region","prefix","hostname","username"}`, the same values the host passed to `connect`; an optional `"path"` selects a filesystem repository instead. |
-| `needs-recovery` | the host | The marker `status` reports. |
+| `connect.json` | the host, or the owner on a box without one; non-secret | `{"bucket","endpoint","region","prefix","hostname","username"}`, the same values the host passed to `connect`; an optional `"path"` selects a filesystem repository instead. |
+| `needs-recovery` | the host, or `serve` | The marker `status` reports. |
 
 **Connects only, never creates.** A create here would answer a wrong key with a second,
 empty repository under the same prefix.

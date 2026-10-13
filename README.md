@@ -18,8 +18,12 @@ into Maison**. It ships:
   kopia, and the kopia-specific hazards the adapter exists to absorb.
 
 Maison invokes it as `docker exec <engine-container> maison-engine <verb> …`. There is no
-HTTP service, no daemon and no listening socket; see
-[Why argv and stdio](docs/protocol.md#why-argv-and-stdio).
+HTTP service and no listening socket; see
+[Why argv and stdio](docs/protocol.md#why-argv-and-stdio). The resident container's own
+process is either `sleep infinity`, where a host side provisions the repository, or
+[`maison-engine serve`](docs/protocol.md#serve), which provisions it from a `connect.json` and
+`credentials.env` the owner drops into the engine directory — the shape of an engine
+installed from an app store.
 
 ## Status
 
@@ -29,9 +33,10 @@ Maison's *current* kopia provider, so v0 covers 100% of what Maison does today a
 speculative. It is expected to change as a second adapter is written — that is the point of
 writing the second one.
 
-Maison's side is in `internal/backup/adapter`, registered from a descriptor the host writes
-at `${DATA_ROOT}/AppDataShared/backup/<engine>/adapter.json`. A box with no descriptor keeps
-using the kopia engine compiled into Maison, so this changes nothing until that file exists.
+Maison's side is in `internal/backup/adapter`, registered from a descriptor at
+`${DATA_ROOT}/AppData/<engine>/engine/adapter.json` (formerly
+`${DATA_ROOT}/AppDataShared/backup/<engine>/`), written by the host side or by `serve`. A box
+with no descriptor has no engine but Maison's local one.
 
 Maison's side of the same design is
 [`docs/backup.md` → The engine adapter](https://github.com/Yundera/maison/blob/main/docs/backup.md),

@@ -119,18 +119,16 @@ The resident container's `hostname` must therefore match `repository.config`. Ma
 
 `repository connect` writes whatever it was given into `repository.config`, and offers no flag
 to stop it — `--no-persist-credentials` governs the repository *password*, not the storage
-key. The host script blanks the two persisted fields afterwards and rotates `credentials.env`
-alone; kopia accepts the key from the environment for every ordinary operation and does not
-write it back.
-
-`connect` must preserve this: blank the persisted fields after creating or connecting.
+key. `connect` blanks the two persisted fields afterwards (`blankPersistedCredentials`), and a
+rotation rewrites `credentials.env` alone; kopia accepts the key from the environment for every
+ordinary operation and does not write it back.
 
 ### `--endpoint` is `host[:port]`, not a URL
 
 Given a URL, kopia fails with `Endpoint url is not valid`. The credential API returns a URL
 because that contract is engine-independent, so **the scheme is stripped here** — this is the
-only place that knows what kopia parses. Today that stripping lives in the host script; it
-belongs in `connect`.
+only place that knows what kopia parses. `connect` does it (`endpointHost`), so a hand-written
+`connect.json` takes the same URL the credential API returns.
 
 ### A filesystem repository has no `credentials.env`
 
@@ -178,8 +176,10 @@ here.
 Built `FROM kopia/kopia:<pinned>`. Pinning is not caution: an engine that changes under a live
 repository turns a format surprise into a 3am failure.
 
-Two containers share the image and the repository — the adapter (`sleep infinity`, exec'd
-into) and kopia's own web UI behind an AppShield gate. That is kopia's ordinary desktop
+Two containers share the image and the repository — the adapter (exec'd into; its own process
+is `sleep infinity` where a host side provisions the repository, or
+[`serve`](protocol.md#serve) where nothing else will) and kopia's own web UI behind an
+AppShield gate. That is kopia's ordinary desktop
 arrangement and is verified to work: a `snapshot create` from one while the other serves
 completes normally. They are separate because their lifecycles differ — the UI reads
 credentials once at start and must be restarted when they rotate; the adapter reads them per

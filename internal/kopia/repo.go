@@ -12,7 +12,7 @@ import (
 )
 
 // Version is this adapter's own version, distinct from the kopia it wraps.
-const Version = "1.2.0"
+const Version = "1.3.0"
 
 // Protocol is the adapter protocol version implemented here. Maison refuses an adapter
 // speaking a dialect it does not know rather than guessing — an unknown dialect is
@@ -171,7 +171,8 @@ func (e *Engine) Connect(ctx context.Context, o ConnectOpts) error {
 	}
 
 	// A password must already exist for a connect; only a create mints one, and minting
-	// it is the host's job (it has to survive the create failing).
+	// it is the caller's job — the host's, or Bootstrap's — because it has to survive
+	// the create failing.
 	if _, err := e.password(); err != nil {
 		return err
 	}

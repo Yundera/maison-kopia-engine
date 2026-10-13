@@ -29,9 +29,18 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 FROM kopia/kopia:${KOPIA_VERSION}
 COPY --from=build /out/maison-engine /usr/local/bin/maison-engine
 
-# The adapter is what this image is FOR, so it is the entrypoint. The two containers in
-# the engine stack override it anyway — the UI runs `kopia server`, the resident adapter
-# runs a sleep and is exec'd into — and Maison names the binary explicitly in both modes.
+# The image's own reference, for the adapter.json `serve` writes. Nothing inside a
+# container can learn which image it was started from without the Docker socket, so the
+# build states it — CI passes the published tag. A compose file that pins the image by a
+# different spelling sets MAISON_ENGINE_IMAGE itself, and that wins: Maison compares the
+# descriptor against the container exactly as it was declared.
+ARG IMAGE_REF=""
+ENV MAISON_ENGINE_IMAGE=${IMAGE_REF}
+
+# The adapter is what this image is FOR, so it is the entrypoint. The UI container
+# overrides it to run `kopia server`; the resident adapter either keeps it and runs
+# `serve`, or (on a deployment whose host provisions the repository) runs a sleep, and is
+# exec'd into either way — Maison names the binary explicitly in both modes.
 # Declaring it here is what makes a bare `docker run <image> capabilities` work, and what
 # stops the image's identity depending on which flag the caller remembered.
 ENTRYPOINT ["/usr/local/bin/maison-engine"]
