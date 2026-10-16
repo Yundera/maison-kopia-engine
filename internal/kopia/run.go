@@ -30,11 +30,13 @@ const Binary = "/bin/kopia"
 type Engine struct {
 	// Dir is --repo-dir: the host-written directory holding repository.config,
 	// repository.password, credentials.env and the caches. The host-side script owns
-	// it, and the adapter writes to it in exactly four places: `connect`, which kopia
-	// itself writes repository.config for; `recover` and `change-secret`, which
-	// promote a key the user supplied to repository.password; and `serve`, which on a
-	// box with no host side does the host's part — the password, the connect, the
-	// needs-recovery marker and adapter.json. Everything else only reads it.
+	// it, and the adapter writes to it in exactly five places: `connect`, which kopia
+	// itself writes repository.config for; `init`, `recover` and `change-secret`,
+	// which promote a key the user supplied to repository.password (`init` also
+	// removes the needs-secret marker); and `serve`, which on a box with no host side
+	// does the host's part — the password, the connect, the needs-recovery marker and
+	// adapter.json. Everything else only reads it — `probe` included, which connects to
+	// a throwaway configuration outside it.
 	Dir string
 
 	Out *proto.Emitter
@@ -144,19 +146,28 @@ func (e *Engine) env(withSecrets bool, password string, extra []string) ([]strin
 // emits no \n until it is done, so anything waiting for whole lines would deliver
 // nothing until exit.
 func (e *Engine) Run(ctx context.Context, args ...string) ([]byte, error) {
-	return e.run(ctx, true, "", nil, args...)
+	return e.run(ctx, "", true, "", nil, args...)
 }
 
 // RunBare is Run without the repository secrets, for a command that must work on a box
 // that has no repository yet — `--version`, and the connect path before a password
 // exists.
 func (e *Engine) RunBare(ctx context.Context, args ...string) ([]byte, error) {
-	return e.run(ctx, false, "", nil, args...)
+	return e.run(ctx, "", false, "", nil, args...)
 }
 
 // runWithPassword is Run with a password that is not (yet) repository.password. See env.
 func (e *Engine) runWithPassword(ctx context.Context, password string, args ...string) ([]byte, error) {
-	return e.run(ctx, true, password, nil, args...)
+	return e.run(ctx, "", true, password, nil, args...)
+}
+
+// runThrowaway is runWithPassword against a configuration file and cache that are not
+// this box's: `probe` connects with a key that cannot be right, and nothing it does may
+// land where every other verb reads. The cache is redirected through the environment —
+// the child's last KOPIA_CACHE_DIRECTORY wins.
+func (e *Engine) runThrowaway(ctx context.Context, dir, password string, args ...string) ([]byte, error) {
+	return e.run(ctx, filepath.Join(dir, "repository.config"), true, password,
+		[]string{"KOPIA_CACHE_DIRECTORY=" + filepath.Join(dir, "cache")}, args...)
 }
 
 // runChangePassword is `repository change-password` from the current key to next.
@@ -164,17 +175,21 @@ func (e *Engine) runWithPassword(ctx context.Context, password string, args ...s
 // The new key travels as KOPIA_NEW_PASSWORD, never as --new-password: argv is readable
 // by every process on the host. Verified against kopia 0.23.1.
 func (e *Engine) runChangePassword(ctx context.Context, next string) ([]byte, error) {
-	return e.run(ctx, true, "", []string{"KOPIA_NEW_PASSWORD=" + next}, "repository", "change-password")
+	return e.run(ctx, "", true, "", []string{"KOPIA_NEW_PASSWORD=" + next}, "repository", "change-password")
 }
 
-func (e *Engine) run(ctx context.Context, withSecrets bool, password string, extra []string, args ...string) ([]byte, error) {
+// cfg, when non-empty, stands in for repository.config. See runThrowaway.
+func (e *Engine) run(ctx context.Context, cfg string, withSecrets bool, password string, extra []string, args ...string) ([]byte, error) {
 	env, err := e.env(withSecrets, password, extra)
 	if err != nil {
 		return nil, err
 	}
+	if cfg == "" {
+		cfg = e.ConfigFile()
+	}
 	// --config-file last, so it applies to every subcommand and no caller has to
 	// remember it. It is the only globally applied flag.
-	args = append(append([]string{}, args...), "--config-file="+e.ConfigFile())
+	args = append(append([]string{}, args...), "--config-file="+cfg)
 
 	cmd := exec.CommandContext(ctx, e.bin(), args...)
 	cmd.Env = env

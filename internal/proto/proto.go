@@ -71,6 +71,15 @@ type Caps struct {
 	// opens the repository, on a box that holds the current one. Maison offers the
 	// change form only when this is set.
 	ChangeSecret bool `json:"changeSecret,omitempty"`
+
+	// Init says the adapter implements `init`: creating the repository with a key the
+	// owner chose, on a box whose storage is empty and which holds no key yet. Maison
+	// offers the choose-a-key form only when this is set.
+	Init bool `json:"init,omitempty"`
+
+	// Probe says the adapter implements `probe`: telling empty storage from storage
+	// that already holds a repository, without a key and without changing anything.
+	Probe bool `json:"probe,omitempty"`
 }
 
 // Status is what `status` returns.
@@ -87,10 +96,16 @@ type Caps struct {
 // nothing here can open it, and it is not "awaiting provisioning" either — provisioning
 // ran and stopped rather than create a second repository over the first. Only the key
 // the user was mailed gets it out, through `recover`.
+//
+// NeedsSecret is a fourth: the storage is reachable and empty, and the box is waiting
+// for the owner to choose the key `init` creates the repository with. Like
+// NeedsRecovery it is reported from the host's marker, with Configured and Connected
+// false.
 type Status struct {
 	Configured    bool   `json:"configured"`
 	Connected     bool   `json:"connected"`
 	NeedsRecovery bool   `json:"needsRecovery,omitempty"`
+	NeedsSecret   bool   `json:"needsSecret,omitempty"`
 	Identity      string `json:"identity,omitempty"`
 	Detail        string `json:"detail,omitempty"`
 }
@@ -101,6 +116,17 @@ type Recovered struct {
 	Snapshots int `json:"snapshots"`
 	Pinned    int `json:"pinned"`
 }
+
+// Probed is what `probe` returns: whether the storage holds a repository.
+type Probed struct {
+	Storage string `json:"storage"` // StorageEmpty | StorageExisting
+}
+
+// Values of Probed.Storage.
+const (
+	StorageEmpty    = "empty"
+	StorageExisting = "existing"
+)
 
 // Backup is one restorable backup of one source.
 type Backup struct {

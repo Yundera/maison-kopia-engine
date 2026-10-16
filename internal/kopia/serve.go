@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/yundera/maison-kopia-engine/internal/proto"
 )
 
 // AdapterFile is the descriptor Maison discovers engines by. It sits in the engine's own
@@ -183,7 +185,11 @@ func (e *Engine) Bootstrap(ctx context.Context, o ServeOpts) (done, retry bool) 
 		e.Out.Log("info", "repository connected as "+opts.Username+"@"+opts.Hostname)
 		return true, false
 
-	case errors.Is(err, ErrRepositoryExists):
+	case errors.Is(err, ErrRepositoryExists), errors.Is(err, proto.ErrWrongPassword):
+		// Since 1.4.0 `connect` answers a key the repository refuses with 14 rather than
+		// falling through to a create that answered 13; both say the storage holds a
+		// repository this box cannot open, and both stop here.
+		//
 		// A password minted a moment ago opens nothing, and leaving it would read as
 		// "configured" to everything that only checks the file is there.
 		if minted {

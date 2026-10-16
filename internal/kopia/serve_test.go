@@ -23,6 +23,8 @@ var testServe = ServeOpts{
 // serveBox is a fresh store-installed engine directory with a stand-in kopia: connect
 // fails (the storage is empty), create writes a filesystem config — unless the storage
 // is told to hold someone else's repository, in which case create says what kopia says.
+// "stub-locked" makes connect refuse the key the way kopia does when a repository is
+// there, which since 1.4.0 stops `connect` before any create.
 func serveBox(t *testing.T) (*Engine, *bytes.Buffer) {
 	t.Helper()
 	var log bytes.Buffer
@@ -33,7 +35,9 @@ cfg=""; host=""; for a in "$@"; do case "$a" in --config-file=*) cfg="${a#--conf
 dir="$(dirname "$cfg")"
 echo "$1 $2 pw=$KOPIA_PASSWORD" >> "$dir/calls"
 case "$1 $2" in
-"repository connect") exit 1;;
+"repository connect")
+	[ -f "$dir/stub-locked" ] && echo "unable to create format manager: invalid repository password" >&2
+	exit 1;;
 "repository create")
 	[ -f "$dir/stub-existing" ] && { echo "found existing data in storage" >&2; exit 1; }
 	[ -f "$dir/stub-down" ] && { echo "dial tcp: connection refused" >&2; exit 1; }
@@ -246,5 +250,24 @@ func TestServeReturnsCleanlyWhenStopped(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not return after cancellation")
+	}
+}
+
+// Since 1.4.0 `connect` answers a refused key with 14 instead of falling through to a
+// create; serve must still read that as someone else's repository and stop.
+func TestBootstrapStopsAtARepositoryThatRefusesTheKey(t *testing.T) {
+	e, _ := serveBox(t)
+	write(t, e.ConnectFile(), `{"path":"/repo","hostname":"kopia-pcs"}`)
+	write(t, filepath.Join(e.Dir, "stub-locked"), "")
+
+	done, retry := e.Bootstrap(context.Background(), testServe)
+	if !done || retry {
+		t.Fatalf("done=%v retry=%v, want a finished bootstrap", done, retry)
+	}
+	if exists(e.PasswordFile()) || !exists(e.MarkerFile()) || exists(e.ConfigFile()) {
+		t.Error("want the minted password gone, a needs-recovery marker and no configuration")
+	}
+	if calls, _ := os.ReadFile(filepath.Join(e.Dir, "calls")); strings.Contains(string(calls), "repository create") {
+		t.Errorf("a create was attempted against a repository that refused the key: %s", calls)
 	}
 }

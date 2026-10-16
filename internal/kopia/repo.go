@@ -12,7 +12,7 @@ import (
 )
 
 // Version is this adapter's own version, distinct from the kopia it wraps.
-const Version = "1.3.0"
+const Version = "1.4.0"
 
 // Protocol is the adapter protocol version implemented here. Maison refuses an adapter
 // speaking a dialect it does not know rather than guessing — an unknown dialect is
@@ -56,6 +56,10 @@ func (e *Engine) Caps(ctx context.Context) proto.Caps {
 		Recover: true,
 		// The repository password can be replaced in place. See ChangeSecret.
 		ChangeSecret: true,
+		// A fresh box creates its repository with a key the owner chose. See Init.
+		Init: true,
+		// Empty storage is told from a repository without a key. See Probe.
+		Probe: true,
 	}
 	if v, err := e.RunBare(ctx, "--version"); err == nil {
 		c.EngineVersion = strings.TrimSpace(strings.SplitN(string(v), " ", 2)[0])
@@ -97,12 +101,18 @@ func (e *Engine) readConfig() (repoConfig, error) {
 // repository this box cannot open, so there is nothing to probe — and reporting "not
 // configured" instead would hide the one state in which the box takes no backups at all
 // while every self-check reports success.
+//
+// The needs-secret marker is reported only while there is no configuration: a box that
+// has one was initialised, and a marker left beside it is stale.
 func (e *Engine) Status(ctx context.Context) proto.Status {
 	if e.needsRecovery() {
 		return proto.Status{NeedsRecovery: true, Detail: "storage holds a repository this box has no key for"}
 	}
 	rc, err := e.readConfig()
 	if err != nil {
+		if err == proto.ErrNotConfigured && e.needsSecret() {
+			return proto.Status{NeedsSecret: true, Detail: "storage is empty; waiting for the owner to choose a backup key"}
+		}
 		return proto.Status{Detail: detailFor(err)}
 	}
 	// A password change cut short between kopia and the file is settled before anything
@@ -156,6 +166,11 @@ type ConnectOpts struct {
 // ErrRepositoryExists is returned when the storage already holds a repository this box
 // has no password for: a rebuilt box. Initialising a second repository under the same
 // prefix would be the destructive answer, so it stops instead.
+//
+// ErrWrongPassword is returned when the connect reached a repository and kopia refused
+// the key. That is decided before any create is attempted: kopia only says "invalid
+// repository password" when the format blob is there, so the storage is certainly not
+// empty and a create could only fail.
 func (e *Engine) Connect(ctx context.Context, o ConnectOpts) error {
 	if _, err := e.readConfig(); err == nil {
 		// Already connected. Nothing to do, and rewriting the file is the one thing that
@@ -181,6 +196,8 @@ func (e *Engine) Connect(ctx context.Context, o ConnectOpts) error {
 	// reinstall that kept the data disk.
 	if _, err := e.Run(ctx, append([]string{"repository", "connect"}, args...)...); err == nil {
 		return e.blankPersistedCredentials()
+	} else if isWrongPassword(err) {
+		return proto.ErrWrongPassword
 	}
 
 	out, err := e.Run(ctx, append([]string{"repository", "create"}, args...)...)

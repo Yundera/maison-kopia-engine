@@ -13,7 +13,7 @@ rediscovered.
 
 | | Source | Note |
 |---|---|---|
-| `KOPIA_PASSWORD` | `repository.password` in `--repo-dir` | Read per invocation, never cached across one. `recover` alone substitutes the candidate key it is testing. |
+| `KOPIA_PASSWORD` | `repository.password` in `--repo-dir` | Read per invocation, never cached across one. `recover` substitutes the candidate key it is testing, `init` the owner's initial key, `probe` a random throwaway one. |
 | `KOPIA_NEW_PASSWORD` | `repository.password.next` in `--repo-dir` | `change-secret` only. kopia's `repository change-password` also takes `--new-password`, which is never used: argv is readable by every process on the host. |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `credentials.env` in `--repo-dir` | **Read fresh every time.** They rotate roughly every 90 days, and an adapter that read them at start would serve errors until it was restarted. |
 | `KOPIA_CACHE_DIRECTORY` | `<repo-dir>/cache` | Must be set explicitly — see below. |
@@ -38,8 +38,10 @@ silently shipped offsite forever.
 | Verb | kopia |
 |---|---|
 | `capabilities` | static; `engineVersion` from `kopia --version` |
-| `connect` | `repository create s3 …` / `repository connect s3 …` |
-| `status` | `needs-recovery` marker, else `repository status` + `state.json` from `--repo-dir` |
+| `connect` | `repository connect s3 …`, then `repository create s3 …` unless the connect was refused with a wrong password |
+| `status` | `needs-recovery` marker, else `needs-secret` marker (no config only), else `repository status` + `state.json` from `--repo-dir` |
+| `probe` | `repository connect …` with a random `KOPIA_PASSWORD`, `--config-file` and `KOPIA_CACHE_DIRECTORY` in a temporary directory removed afterwards |
+| `init` | `repository create …` (never `connect` first) with `KOPIA_PASSWORD` = `.initial` |
 | `prepare` | `repository status` (warms the cache, proves reachability) |
 | `change-secret` | `repository change-password` with `KOPIA_PASSWORD` = the current key and `KOPIA_NEW_PASSWORD` = `.next`; on an ambiguous failure, `repository status` with each key to learn which one the repository now takes |
 | `recover` | `repository connect …` (never `create`) with `KOPIA_PASSWORD` = the candidate, then `snapshot list --all --json` and `snapshot pin --add=maison-recovered <id>…` in batches of 50 |
@@ -142,6 +144,28 @@ kopia has no distinct exit status for a wrong password. 0.23.1 fails `repository
 with `… unable to create format manager: invalid repository password`, writes no
 configuration file, and removes the cache directory it was about to use. `recover` matches
 that phrase (case-insensitively) and exits `14`; anything else is an ordinary failure.
+`connect` matches it too, and exits `14` rather than attempting the create.
+
+### Empty storage is recognised by its text too
+
+`probe` tells empty storage from a repository by connecting with a key that cannot be right
+and reading the refusal. Verified against kopia 0.23.1:
+
+| Storage | `repository connect` fails with |
+|---|---|
+| empty (or holding only non-kopia files) | `error connecting to repository: repository not initialized in the provided storage` |
+| a repository | `… unable to create format manager: invalid repository password` |
+| unreachable (a filesystem path that does not exist) | `can't connect to storage: cannot access storage path: …` |
+
+Only the first phrase answers `empty`, only the second (or a connect that succeeds) answers
+`existing`, and everything else is exit `1`. "Empty" leads the caller to create a repository,
+so it is never answered on doubt: a provider error worded in a way not seen yet fails the
+probe instead of reading as empty storage.
+
+`repository create` on storage that holds a repository fails with
+`unable to get repository storage: found existing data in storage location`, which `init`
+and `connect` match for exit `13`. A location holding only files kopia does not recognise
+counts as empty for both verbs.
 
 ### Changing the password re-wraps, it does not re-encrypt
 

@@ -1,6 +1,6 @@
 # The Maison backup adapter protocol
 
-Version **v0**, implemented by the kopia adapter (`maison-kopia-engine` 1.1.0).
+Version **v0**, implemented by the kopia adapter (`maison-kopia-engine` 1.4.0).
 
 An *adapter* is a container image holding a backup engine and a `maison-engine` binary that
 speaks this protocol. Maison runs one adapter per configured engine and knows nothing about
@@ -109,8 +109,8 @@ tail and uses it in the error message when the exit code is non-zero.
 | `10` | **not configured** — no repository connected, credentials absent | Renders "not configured". **Not an error**, and not an incident: it is the normal state of a box whose host side has not run. |
 | `11` | **not supported** — this engine cannot do this verb | Maps to `ErrNotSupported`. Must agree with `capabilities`. |
 | `12` | **not writable** — the repository is reachable but refuses writes (a suspended storage space) | Reads and restores continue; writes are reported as failed. |
-| `13` | **repository exists** — the storage already holds a repository this box has no password for | Stop. The host — or `serve`, on a box without one — writes a `needs-recovery` marker and does not initialise a second repository under the same prefix. |
-| `14` | **wrong password** — the key offered to `recover` does not open the repository, or the box's own key no longer opens it when `change-secret` runs | Tell the user the key is wrong and let them try again. Nothing on the box changed. |
+| `13` | **repository exists** — the storage already holds a repository this box has no password for (`connect`'s create, or `init`) | Stop. The host — or `serve`, on a box without one — writes a `needs-recovery` marker and does not initialise a second repository under the same prefix. |
+| `14` | **wrong password** — the key offered to `recover` does not open the repository, the box's own key no longer opens it when `change-secret` runs, or `connect` reached a repository that refuses `repository.password` | Tell the user the key is wrong and let them try again. Nothing on the box changed. From `connect` it means the same as `13` to the host: the storage holds a repository this box cannot open. |
 | `1` | any other failure | Operation fails, stderr tail is surfaced. |
 
 `10`, `11`, `13` and `14` must be distinguished from `1`. Collapsing `10` turns an unprovisioned
@@ -147,7 +147,7 @@ Accepted by every verb:
 
 | Flag | Meaning |
 |---|---|
-| `--repo-dir <path>` | The engine's own directory — `${DATA_ROOT}/AppData/<engine>/engine/` (formerly `${DATA_ROOT}/AppDataShared/backup/<engine>/`). Holds `repository.config`, `repository.password`, `credentials.env`, caches and logs. The adapter reads it; the host side writes it, except for what `connect`, `recover`, `change-secret` and `serve` write (see each). |
+| `--repo-dir <path>` | The engine's own directory — `${DATA_ROOT}/AppData/<engine>/engine/` (formerly `${DATA_ROOT}/AppDataShared/backup/<engine>/`). Holds `repository.config`, `repository.password`, `credentials.env`, caches and logs. The adapter reads it; the host side writes it, except for what `connect`, `init`, `recover`, `change-secret` and `serve` write (see each). |
 | `--timeout <duration>` | Advisory. Maison enforces its own; this lets the adapter fail cleanly first with a better message. |
 
 **The adapter reads its own secrets from `--repo-dir` and is passed none.** The repository
@@ -180,6 +180,14 @@ Exits `10` if there is no `repository.password` — a box not yet provisioned, n
 The password is the caller's to mint, before the create, because it has to survive the create
 failing. Absent storage credentials are not refused: a filesystem repository has none.
 
+Exits `14` (since 1.4.0) when the connect reaches a repository that refuses
+`repository.password`. The create is not attempted: storage that answers "wrong password"
+certainly holds a repository, and before 1.4.0 the create that followed came back as `13`.
+A caller that minted the password treats `14` exactly as `13`.
+
+A box whose owner chooses the key uses [`probe`](#probe) and [`init`](#init) instead: the host
+mints nothing, and `connect` is only for a box that already holds `repository.password`.
+
 #### `serve`
 No verb flags. **The resident container's main process**, in place of `sleep infinity`, for a
 box with no host side to provision the repository — an engine installed from an app store.
@@ -196,7 +204,7 @@ left to do, in this order — the order of the host's `ensure-backup-config.sh`,
 4. No `repository.password` → mint one (33 random bytes, base64, `0600`), **before** the
    create, so a crash between the two cannot lose the only key.
 5. `connect`, with `connect.json`'s values; `hostname` defaults to the container's own and
-   `username` to `pcs`. Success → `adapter.json`, done. Exit-`13` state → remove a password
+   `username` to `pcs`. Success → `adapter.json`, done. Exit-`13` or `14` state → remove a password
    minted in this run, write `needs-recovery` and `adapter.json`, done. Anything else → keep
    the password and retry with a backoff capped at fifteen minutes.
 
@@ -214,6 +222,52 @@ warned about: Maison only execs into a container whose hostname matches the desc
 every command would pay for a one-shot container instead.
 
 As PID 1 it also reaps the orphans a killed `docker exec` leaves behind.
+
+#### `probe`
+No verb flags. Says whether the storage already holds a repository, **without a key and
+without changing anything on the box** — what lets a host decide between asking the owner to
+choose a key (`init`) and asking for the old one (`recover`), instead of minting a key and
+finding out by trying to create.
+
+Reads `connect.json` and, for storage that needs them (anything but a filesystem `"path"`),
+`credentials.env`. Needs no password.
+
+- Either file missing, or `connect.json` unusable → exit `10`.
+- Returns `{"storage":"empty"}` or `{"storage":"existing"}`, exit `0`.
+- Anything it cannot classify — unreachable storage, refused credentials, an error worded in a
+  way the adapter does not recognise — → exit `1`. **"Empty" is only ever answered on the
+  engine's own word for it**, because it leads the caller to create a repository.
+
+The kopia adapter connects with a random key to a configuration file and cache in a temporary
+directory, removed afterwards. Only offered when `capabilities` reports `probe: true`.
+
+#### `init`
+No verb flags. Creates the repository with a key **the owner chose**, on a box whose storage
+is empty and which holds no key yet — the state the `needs-secret` marker describes. The mirror
+image of `recover`: create only, never connect.
+
+It reads from `--repo-dir`:
+
+| File | Written by | |
+|---|---|---|
+| `repository.password.initial` | Maison, `0600` | The key the owner chose. **Removed on every path**, success or failure. |
+| `connect.json` | the host | As for `recover`. |
+| `credentials.env` | the host | Required unless `connect.json` names a filesystem `"path"`. |
+| `needs-secret` | the host | The marker `status` reports: `{"reason":"no-password","spaceId","prefix","detectedAt"}`. Its contents are diagnostics; presence is the signal. |
+
+- No `.initial`, or no usable `connect.json` / `credentials.env` → exit `10`.
+- A repository configuration already exists → exit `1` ("already connected").
+- An empty key → exit `1`. The caller enforces its own minimum length.
+- The storage already holds a repository → exit `13`. Nothing on the box changes; the way out
+  is `recover` with the old key, never a second repository.
+- Any other failure → exit `1`.
+- Success: `.initial` becomes `repository.password` (atomically, `0600`, owned like
+  `--repo-dir`), the persisted storage credentials are blanked as `connect` does,
+  `repository.config` is given to the directory's owner, and the `needs-secret` marker is
+  removed — as is a `needs-recovery` marker, which the create succeeding proves stale.
+
+Returns `{"snapshots": 0, "pinned": 0}`, the shape of `recover`'s result. Only offered when
+`capabilities` reports `init: true`.
 
 #### `status`
 Returns [`Status`](#status-1). Must answer without a working repository, distinguishing
@@ -398,7 +452,7 @@ explicitly instead.
 {
   "engineId": "kopia",             // permanent. Recorded on every backup this adapter writes.
   "engineVersion": "0.23.1",
-  "adapterVersion": "1.2.0",
+  "adapterVersion": "1.4.0",
   "protocol": "v0",
 
   "offsite": true,                 // survives the loss of this machine
@@ -412,7 +466,9 @@ explicitly instead.
 
   "retentionModel": "snapshot",    // snapshot | chain | lifecycle | none
   "recover": true,                 // implements `recover`; Maison offers the key form only when set
-  "changeSecret": true             // implements `change-secret`; Maison offers the change form only when set
+  "changeSecret": true,            // implements `change-secret`; Maison offers the change form only when set
+  "init": true,                    // implements `init`; Maison offers the choose-a-key form only when set
+  "probe": true                    // implements `probe`
 }
 ```
 
@@ -443,6 +499,7 @@ question from who performs it and from what the user asked for:
   "configured": true,              // a repository configuration exists on disk
   "connected": true,               // it was reachable on this probe
   "needsRecovery": false,          // the storage holds a repository this box has no key for (omitted when false)
+  "needsSecret": false,            // the storage is empty and the box awaits the owner's key (omitted when false)
   "identity": "pcs@a1b2c3d4",      // the lineage snapshots are filed under
   "detail": ""                     // human-readable, for the settings page when something is wrong
 }
@@ -463,6 +520,12 @@ conflated: the first is a box awaiting provisioning, the second is a fault.
 `--repo-dir`, with `configured` and `connected` both false. It is neither of the other two:
 provisioning ran and stopped rather than create a second repository over the first, and the
 box takes no backups until the user enters the key through [`recover`](#recover).
+
+`needsSecret: true` is a fourth, reported when the host's `needs-secret` marker is in
+`--repo-dir` **and there is no repository configuration** (a marker beside a configuration is
+stale and ignored), with `configured` and `connected` both false. The storage is reachable and
+empty, and the box takes no backups until the owner chooses a key through [`init`](#init).
+`needsRecovery` outranks it.
 
 `identity` is what Maison compares against the resident container before using it. A
 container disagreeing would open a second lineage inside one repository — see
