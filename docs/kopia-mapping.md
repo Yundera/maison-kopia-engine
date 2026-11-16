@@ -117,6 +117,17 @@ bill grows.
 The resident container's `hostname` must therefore match `repository.config`. Maison compares
 `status.identity` before using the container.
 
+### Several lineages can share one repository
+
+A rebuilt box comes back with a new device id, so a new `user@host`, and restores its
+predecessor's backups; two boxes of one user may later write to one space. `snapshot list
+--all` shows every lineage, and a stamp alone does not say which box wrote a snapshot. So:
+`commit` and `abort` touch only snapshots whose `source` is this box's identity
+(`repository.config`); `restore`, `entries` and `materialize` reach every lineage, this
+box's copy first on a shared stamp; `delete` removes this box's copy when it holds the
+stamp, else the other lineage's (what `list` offered). With no readable identity nothing
+is filtered.
+
 ### Storage credentials must not be persisted into the config
 
 `repository connect` writes whatever it was given into `repository.config`, and offers no flag

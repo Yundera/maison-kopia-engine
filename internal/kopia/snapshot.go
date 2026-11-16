@@ -125,6 +125,9 @@ func (e *Engine) Commit(ctx context.Context, sourceID, stamp string) (proto.Back
 	if err != nil {
 		return proto.Backup{}, err
 	}
+	// Only this box's own lineage: another box in the same space can hold a snapshot
+	// with the same source and stamp, and it is not this run's to drop.
+	snaps = ownedBy(snaps, e.identity())
 	var committed *snapshot
 	for i := range snaps {
 		sn := &snaps[i]
@@ -158,6 +161,37 @@ func (e *Engine) Abort(ctx context.Context, sourceID, stamp string) error {
 		}
 		return err
 	}
+	// Abort undoes this box's own run, never a same-stamp snapshot another box wrote.
+	return e.deleteStamp(ctx, ownedBy(snaps, e.identity()), stamp)
+}
+
+// Delete removes one committed backup: every manifest carrying the stamp. The user
+// picked it from List, which shows every lineage — a rebuilt box lists its
+// predecessor's backups — so a stamp only another lineage holds is deleted there.
+// When this box holds the stamp too, only its own copy goes.
+func (e *Engine) Delete(ctx context.Context, sourceID, stamp string) error {
+	snaps, err := e.snapshotsFor(ctx, sourceID)
+	if err != nil {
+		if errors.Is(err, proto.ErrNotConfigured) {
+			return nil
+		}
+		return err
+	}
+	return e.deleteStamp(ctx, deletionSet(snaps, e.identity(), stamp), stamp)
+}
+
+// deletionSet is what Delete removes for a stamp: this box's snapshots carrying it if
+// there are any, else every lineage's.
+func deletionSet(snaps []snapshot, id identity, stamp string) []snapshot {
+	for _, sn := range ownedBy(snaps, id) {
+		if sn.tag(tagStamp) == stamp {
+			return ownedBy(snaps, id)
+		}
+	}
+	return snaps
+}
+
+func (e *Engine) deleteStamp(ctx context.Context, snaps []snapshot, stamp string) error {
 	var errs []error
 	for _, sn := range snaps {
 		if sn.tag(tagStamp) == stamp {
@@ -167,12 +201,6 @@ func (e *Engine) Abort(ctx context.Context, sourceID, stamp string) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// Delete removes one committed backup. Same mechanics as Abort: a stamp identifies
-// every manifest that carries it.
-func (e *Engine) Delete(ctx context.Context, sourceID, stamp string) error {
-	return e.Abort(ctx, sourceID, stamp)
 }
 
 // List returns one source's committed backups, newest first.
@@ -241,7 +269,9 @@ func (e *Engine) snapshotID(ctx context.Context, sourceID, stamp string) (string
 	if err != nil {
 		return "", err
 	}
-	for _, sn := range snaps {
+	// Every lineage stays restorable — a rebuilt box comes back with a new identity and
+	// restores its predecessor's backups — but on a stamp both hold, this box's wins.
+	for _, sn := range ownFirst(snaps, e.identity()) {
 		if sn.tag(tagStamp) == stamp && sn.tag(tagPass) != "1" {
 			return sn.ID, nil
 		}
@@ -265,6 +295,57 @@ type snapshot struct {
 		} `json:"summ"`
 	} `json:"rootEntry"`
 	Tags map[string]string `json:"tags"`
+	// Source is kopia's user@host:path for the snapshot: which box wrote it.
+	Source struct {
+		Host     string `json:"host"`
+		UserName string `json:"userName"`
+	} `json:"source"`
+}
+
+// identity is the user@host this box files its snapshots under (repository.config).
+type identity struct{ host, user string }
+
+// identity reads it; an unreadable configuration gives the zero identity, which
+// filters nothing.
+func (e *Engine) identity() identity {
+	rc, err := e.readConfig()
+	if err != nil {
+		return identity{}
+	}
+	return identity{host: rc.Hostname, user: rc.Username}
+}
+
+func (s snapshot) writtenBy(id identity) bool {
+	return s.Source.Host == id.host && s.Source.UserName == id.user
+}
+
+// ownedBy keeps the snapshots this box wrote. With no known identity it keeps all of
+// them: the behaviour before boxes could share a repository.
+func ownedBy(snaps []snapshot, id identity) []snapshot {
+	if id.host == "" {
+		return snaps
+	}
+	var out []snapshot
+	for _, sn := range snaps {
+		if sn.writtenBy(id) {
+			out = append(out, sn)
+		}
+	}
+	return out
+}
+
+// ownFirst is every snapshot, this box's before the others', order otherwise kept.
+func ownFirst(snaps []snapshot, id identity) []snapshot {
+	if id.host == "" {
+		return snaps
+	}
+	out := ownedBy(snaps, id)
+	for _, sn := range snaps {
+		if !sn.writtenBy(id) {
+			out = append(out, sn)
+		}
+	}
+	return out
 }
 
 // tag reads one of the adapter's tags, through the "tag:" prefix the JSON carries and
