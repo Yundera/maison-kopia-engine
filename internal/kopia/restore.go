@@ -29,6 +29,15 @@ func (e *Engine) Materialize(ctx context.Context, sourceID, stamp, dest string) 
 // created after the backup survive it and the result is a state that never existed.
 // Overwriting is kopia's default, so only the deletion has to be asked for.
 //
+// It is incremental when it can be: dest is compared with the backup first and only
+// what differs is written (see inplace.go). That turns on --skip-existing, which is
+// correct only because everything that differs has just been removed. When the
+// comparison cannot be made, the restore is the full one.
+//
+// --write-files-atomically, either way: a file is written beside itself and renamed
+// into place, so nothing holding the old file open ever reads or writes a half-restored
+// one.
+//
 // It is not atomic, and the caller knows it: an interruption leaves dest in neither
 // state, which is why an undo snapshot is taken first.
 //
@@ -44,21 +53,36 @@ func (e *Engine) RestoreInPlace(ctx context.Context, sourceID, stamp, dest strin
 	if err != nil {
 		return err
 	}
-	if len(entries) == 0 {
-		_, err = e.Run(ctx, "restore", id, dest, "--progress", "--delete-extra")
+	var wanted []proto.Entry
+	var only map[string]bool
+	if len(entries) > 0 {
+		have, err := e.entries(ctx, id)
+		if err != nil {
+			return err
+		}
+		if wanted, err = selectEntries(have, entries); err != nil {
+			return err
+		}
+		only = map[string]bool{}
+		for _, en := range wanted {
+			only[en.Name] = true
+		}
+	}
+	incremental, err := e.prepareIncremental(ctx, sourceID, id, dest, only)
+	if err != nil {
 		return err
+	}
+	mode := []string{"--progress", "--write-files-atomically"}
+	if incremental {
+		mode = append(mode, "--skip-existing")
 	}
 
-	have, err := e.entries(ctx, id)
-	if err != nil {
-		return err
-	}
-	wanted, err := selectEntries(have, entries)
-	if err != nil {
+	if len(entries) == 0 {
+		_, err = e.Run(ctx, append([]string{"restore", id, dest, "--delete-extra"}, mode...)...)
 		return err
 	}
 	for _, en := range wanted {
-		args := []string{"restore", id + "/" + en.Name, filepath.Join(dest, en.Name), "--progress"}
+		args := append([]string{"restore", id + "/" + en.Name, filepath.Join(dest, en.Name)}, mode...)
 		// Only a directory can hold extra files. Aimed at a plain file --delete-extra
 		// has nothing to act on, and overwriting is kopia's default.
 		if en.Dir {

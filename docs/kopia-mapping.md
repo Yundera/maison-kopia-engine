@@ -50,7 +50,7 @@ silently shipped offsite forever.
 | `abort` | `snapshot delete` every manifest carrying the stamp |
 | `list` / `list-all` | `snapshot list --all --json`, filtered by tag |
 | `materialize` | `snapshot restore <id> <dest>` |
-| `restore-in-place` | `snapshot restore <id> <dest>` over the live folder |
+| `restore-in-place` | a survey `snapshot create <dest>`, `show` on each differing directory, removal of what differs, then `snapshot restore <id> <dest> --skip-existing --delete-extra --write-files-atomically`; the full restore (no `--skip-existing`) when the survey cannot be used |
 | `delete` | `snapshot delete <id> --delete` |
 | `ensure-retention` | `policy set <path> --keep-hourly … --keep-annual …` |
 
@@ -96,6 +96,43 @@ judgement. It has no way to know whether this snapshot is the live pass of an ap
 be stopped or the only pass of a set that stops nothing, and guessing wrong in the
 permissive direction costs an outage a second round trip while guessing wrong in the other
 direction ships data that was declared excluded.
+
+### An in-place restore writes only what differs
+
+A plain `snapshot restore --delete-extra` rewrites every byte of the backup. Rolling back a
+failed update, the folder is the one backed up minutes earlier: on yunderateam's Nextcloud
+(2026-11-16) that was 334 GB rewritten at 35 MB/s — 2.5 h of downtime to change a few
+hundred MB. So `restore-in-place` first finds what differs (`internal/kopia/inplace.go`):
+
+1. **Survey.** `snapshot create <dest>` under the backup's source tag plus
+   `maison-survey:<nonce>`, and no stamp — so it is never listed, never a backup, and
+   `snapshotID` cannot resolve to it. Kopia reuses every file whose size and mtime match
+   the previous snapshot, so a folder that was just backed up surveys in minutes. Dropped
+   when the restore is done, along with any an interrupted run left.
+2. **Compare.** A directory's object id hashes its listing — name, type, mode, owner,
+   nanosecond mtime, size and content id of every entry — so equal ids are identical
+   subtrees, and `show <dir obj>` is read only where the two trees differ. A chmod-only
+   change differs too (verified against 0.23.1; `kopia diff` would not list it per path).
+3. **Remove** every entry both trees hold with a different content or metadata, and every
+   entry whose type changed. No ancestor between `<dest>` and an entry may be a symlink.
+4. **Restore** with `--skip-existing --delete-extra`: what was removed or missing is
+   written back, what the backup does not hold is deleted, the rest is skipped.
+
+The trust is kopia's own: a file changed with its size and mtime kept reads as unchanged,
+as it would to the next nightly. Anything unsettled — the backup taken of another path
+than `<dest>` (no previous snapshot to reuse), more than 20 000 differing directories,
+a name that is not one path element, a failed survey — falls back to the full restore.
+
+**Retention counts the survey.** Kopia applies a source's retention after every
+`snapshot create`, and a pinned snapshot holds a slot like any other (verified: a pinned
+extra under `keep-latest 2` evicted the oldest backup). The survey is therefore taken with
+`keep-latest` and every non-zero tier one wider — the survey takes the newest slot of each,
+and every backup keeps the one it had — and the effective values are written back right
+after. `ensure-retention` installs them explicitly on every source, so writing the
+effective values back changes nothing; if it fails, the next `ensure-retention` repairs it.
+
+`--write-files-atomically` is on for both forms: a file is written beside itself and
+renamed into place, so nothing holding the old one open writes into the restored one.
 
 ---
 
